@@ -8,6 +8,7 @@
 
 const ICON_CHECK = '<svg viewBox="0 0 16 16" fill="none"><path d="M3 8.5L6.2 11.7L13 4.5" stroke="#06111f" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 const ICON_SPARKLE = '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2l1.8 6.2L20 10l-6.2 1.8L12 18l-1.8-6.2L4 10l6.2-1.8L12 2z"/></svg>';
+const ICON_UPLOAD = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11"/><path d="M7.5 9.5 12 5l4.5 4.5"/><path d="M5 15.5v2a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-2"/></svg>';
 
 const CATEGORY_COLORS = {
   'Terminal & Sistema': '#22d3ee',
@@ -319,6 +320,7 @@ const MOCK_CONFIG = {
   backupFolders: [],
   projects: ['git@github.com:netovieira/myscripts.git'],
   projectsFolder: 'D:\\projects',
+  customProfilePath: '',
   presetsDir: 'C:\\Users\\exemplo\\AppData\\Local\\Genesis\\Presets',
   profileSource: [
     'function goto {',
@@ -395,6 +397,18 @@ function mockHandle(type, payload) {
   if (type === 'save-preset') {
     setTimeout(() => Bridge._dispatch({ type: 'preset-saved', payload: { ok: true, fileName: 'mock.gnpreset', name: payload.name } }), 200);
   }
+  if (type === 'preview-profile') {
+    const extra = payload.customPath ? `\n\n# ==============================\n# Adicionado por você (${payload.customPath})\n# ==============================\n\nSet-Alias exemplo-mock Get-ChildItem` : '';
+    const text = MOCK_CONFIG.profileSource + extra;
+    setTimeout(() => Bridge._dispatch({ type: 'profile-preview', payload: { ok: true, contentB64: encodeBase64Utf8(text) } }), 200);
+  }
+}
+
+function encodeBase64Utf8(text) {
+  const bytes = new TextEncoder().encode(text);
+  let binary = '';
+  bytes.forEach((b) => { binary += String.fromCharCode(b); });
+  return btoa(binary);
 }
 
 function simulateInstall() {
@@ -440,6 +454,11 @@ const state = {
   config: null,
   selectedApps: new Set(),
   installedIds: new Set(),
+  // Apps ja instalados que o usuario confirmou querer remover (ver
+  // catalogCard/bindCatalogCards) - desinstalados de verdade so na etapa
+  // de instalacao (Install-WingetApps -UninstallIds), nunca na hora do
+  // clique.
+  appsToUninstall: new Set(),
   extraApps: [],
   catalogQuery: '',
   catalogCategory: 'Todos',
@@ -451,6 +470,16 @@ const state = {
   backupFolders: [],
   projectsFolder: '',
   projectsText: '',
+  // Profile do PowerShell (ver viewProfilePreview/requestProfilePreview):
+  // customProfilePath e o arquivo extra que o usuario aponta (ex: o
+  // profile de verdade dele, guardado num repo git privado); profilePreview
+  // e o conteudo ja mesclado (padrao + o que existe na maquina + esse
+  // arquivo) que o PS manda de volta sob demanda.
+  customProfilePath: '',
+  profilePreview: '',
+  profilePreviewKey: null,
+  profilePreviewLoading: false,
+  profilePreviewError: '',
   stepIndex: 0,
   installResults: {},
   appInstallStatus: {},
@@ -466,6 +495,7 @@ const state = {
   activePreset: null,
   presetNotice: '',
   presetError: '',
+  presetsBusy: false,
   modal: null,
 };
 
@@ -512,6 +542,7 @@ function onBridgeMessage(msg) {
     state.homeAssistant = { mode: 'vm', vdiPath: '', backupPath: '', ...(msg.payload.homeAssistant || {}) };
     state.backupFolders = [...(msg.payload.backupFolders || [])];
     state.projectsFolder = msg.payload.projectsFolder || '';
+    state.customProfilePath = msg.payload.customProfilePath || '';
     state.projectsText = (msg.payload.projects || [])
       .map((p) => (typeof p === 'string' ? p : `${p.url} => ${p.name}`))
       .join('\n');
@@ -525,6 +556,7 @@ function onBridgeMessage(msg) {
     render();
   }
   if (msg.type === 'preset-loaded') {
+    state.presetsBusy = false;
     if (msg.payload && msg.payload.ok === false) {
       state.presetError = `Não foi possível abrir o preset: ${msg.payload.error || 'erro desconhecido'}`;
     } else {
@@ -534,8 +566,14 @@ function onBridgeMessage(msg) {
   }
   if (msg.type === 'preset-saved') {
     if (msg.payload && msg.payload.ok === false) {
-      state.presetError = `Não foi possível salvar o preset: ${msg.payload.error || 'erro desconhecido'}`;
-      state.modal = null;
+      // Mantem o modal aberto com o erro ali dentro - fechar direto pra
+      // Revisao deixava a mensagem invisivel (so aparecia se o usuario
+      // voltasse pro Bem-vindo por conta propria) e o fluxo sem saida:
+      // nao instalava nem deixava tentar de novo.
+      if (state.modal && state.modal.type === 'save-preset') {
+        state.modal.saving = false;
+        state.modal.error = msg.payload.error || 'erro desconhecido';
+      }
       render();
     } else {
       state.activePreset = snapshotPreset(msg.payload.name);
@@ -550,6 +588,17 @@ function onBridgeMessage(msg) {
     if (field === 'haVdiPath') state.homeAssistant.vdiPath = path;
     if (field === 'haBackupPath') state.homeAssistant.backupPath = path;
     if (field === 'projectsFolder') state.projectsFolder = path;
+    if (field === 'customProfilePath') state.customProfilePath = path;
+    render();
+  }
+  if (msg.type === 'profile-preview') {
+    state.profilePreviewLoading = false;
+    if (msg.payload && msg.payload.ok === false) {
+      state.profilePreviewError = msg.payload.error || 'erro desconhecido';
+    } else {
+      state.profilePreviewError = '';
+      state.profilePreview = decodeBase64Utf8(msg.payload.contentB64);
+    }
     render();
   }
   if (msg.type === 'projects-folder-result') {
@@ -662,22 +711,26 @@ const $modalRoot = document.getElementById('modal-root');
 function renderModal() {
   if (!state.modal) { $modalRoot.innerHTML = ''; return; }
   if (state.modal.type === 'save-preset') { $modalRoot.innerHTML = viewSavePresetModal(); bindSavePresetModal(); }
+  if (state.modal.type === 'confirm-uninstall') { $modalRoot.innerHTML = viewConfirmUninstallModal(); bindConfirmUninstallModal(); }
 }
 
 function viewSavePresetModal() {
-  const suggested = `Setup ${new Date().toLocaleDateString('pt-BR')}`;
+  const m = state.modal;
+  const errorHtml = m.error
+    ? `<div class="preset-banner is-error" style="margin:14px 0 0">Não foi possível salvar: ${escapeHtml(m.error)}</div>` : '';
   return `
     <div class="modal-overlay" id="modal-overlay">
       <div class="modal-card">
         <p class="panel-title">Salvar como preset?</p>
         <p class="panel-sub">
           Você marcou ou desmarcou algo desde ${state.activePreset && state.activePreset.name !== 'Padrão' ? `o preset "${escapeHtml(state.activePreset.name)}"` : 'os padrões'}.
-          Dá pra salvar essa combinação de apps e etapas num arquivo <code>${'.gnpreset'}</code> pra reusar da próxima vez.
+          Dá pra salvar essa combinação de apps e etapas num arquivo <code>.gnpreset</code> pra reusar da próxima vez.
         </p>
-        <input type="text" class="modal-input" id="preset-name-input" placeholder="Nome do preset" value="${escapeAttr(suggested)}" />
+        <input type="text" class="modal-input" id="preset-name-input" placeholder="Nome do preset" value="${escapeAttr(m.name)}" ${m.saving ? 'disabled' : ''} />
+        ${errorHtml}
         <div class="modal-actions">
-          <button class="btn btn-subtle" id="modal-skip">Não salvar</button>
-          <button class="btn btn-primary" id="modal-save">Salvar e continuar</button>
+          <button class="btn btn-subtle" id="modal-skip" ${m.saving ? 'disabled' : ''}>Não salvar</button>
+          <button class="btn btn-primary" id="modal-save" ${m.saving ? 'disabled' : ''}>${m.saving ? 'Salvando…' : 'Salvar e continuar'}</button>
         </div>
       </div>
     </div>`;
@@ -687,11 +740,15 @@ function bindSavePresetModal() {
   const $input = document.getElementById('preset-name-input');
   $input.focus();
   $input.select();
+  $input.addEventListener('input', () => { state.modal.name = $input.value; });
   document.getElementById('modal-skip').addEventListener('click', () => resolvePresetModal());
   document.getElementById('modal-save').addEventListener('click', () => {
-    const name = $input.value.trim() || 'Meu preset';
+    state.modal.name = ($input.value.trim() || 'Meu preset');
+    state.modal.saving = true;
+    state.modal.error = '';
+    render();
     Bridge.send('save-preset', {
-      name,
+      name: state.modal.name,
       selectedApps: [...state.selectedApps],
       tasks: state.tasks,
       extraApps: state.extraApps,
@@ -699,7 +756,7 @@ function bindSavePresetModal() {
   });
   $input.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') document.getElementById('modal-save').click();
-    if (e.key === 'Escape') resolvePresetModal();
+    if (e.key === 'Escape' && !state.modal.saving) resolvePresetModal();
   });
 }
 
@@ -813,7 +870,7 @@ function onNext() {
   if (step.id === 'profile') { state.tasks.PowerShellProfile = true; }
   if (step.id === 'review') {
     if (presetsDiffer(snapshotPreset(), state.activePreset)) {
-      state.modal = { type: 'save-preset' };
+      state.modal = { type: 'save-preset', name: `Setup ${new Date().toLocaleDateString('pt-BR')}`, saving: false, error: '' };
       render();
       return;
     }
@@ -841,11 +898,13 @@ function startInstall() {
   });
   Bridge.send('start-install', {
     selectedAppIds: [...state.selectedApps],
+    uninstallAppIds: [...state.appsToUninstall],
     extraApps: state.extraApps,
     tasks: state.tasks,
     homeAssistant: state.homeAssistant,
     backupFolders: state.backupFolders.filter((f) => f.trim()),
     projectsFolder: state.projectsFolder,
+    customProfilePath: state.customProfilePath,
     projects,
   });
   const steps = buildSteps();
@@ -867,7 +926,7 @@ function renderContent(step) {
   if (step.id === 'catalog') { $content.innerHTML = viewCatalog(); bindCatalog(); return; }
   if (step.id === 'search-more') { $content.innerHTML = viewSearchMore(); bindSearchMore(); return; }
   if (step.id === 'suite') { $content.innerHTML = viewSuiteHub(); return; }
-  if (step.id === 'profile') { $content.innerHTML = viewProfilePreview(); return; }
+  if (step.id === 'profile') { $content.innerHTML = viewProfilePreview(); bindProfile(); requestProfilePreview(); return; }
   $content.innerHTML = (renderers[step.id] || viewWelcome)();
   if (step.id === 'welcome') bindWelcome();
   if (step.id === 'review') bindReview();
@@ -909,8 +968,10 @@ function viewPresetsPanel() {
   const error = state.presetError
     ? `<div class="preset-banner is-error">${escapeHtml(state.presetError)}</div>` : '';
   const detected = state.detectedPresets || [];
+  const busy = state.presetsBusy;
 
   const detectedHtml = detected.length ? `
+    <p class="preset-section-label">Encontrado${detected.length > 1 ? 's' : ''} em ${escapeHtml(state.config.presetsDir || 'Presets')}</p>
     <div class="preset-list">
       ${detected.map((p) => `
         <div class="preset-row">
@@ -918,7 +979,7 @@ function viewPresetsPanel() {
             <div class="preset-row-name">${escapeHtml(p.name)}</div>
             <div class="preset-row-meta">${p.appCount} app(s)${p.createdAt ? ' · ' + escapeHtml(new Date(p.createdAt).toLocaleDateString('pt-BR')) : ''}</div>
           </div>
-          <button class="btn btn-ghost" data-load-preset="${escapeAttr(p.fileName)}">Usar</button>
+          <button class="btn btn-ghost" data-load-preset="${escapeAttr(p.fileName)}" ${busy ? 'disabled' : ''}>Usar</button>
         </div>
       `).join('')}
     </div>` : '';
@@ -932,12 +993,17 @@ function viewPresetsPanel() {
         que quiser nas próximas telas: no "Instalar agora" o Genesis pergunta se você quer salvar.
       </p>
       ${notice}${error}
-      ${detected.length ? `<p class="check-desc" style="margin-bottom:4px">Encontrado${detected.length > 1 ? 's' : ''} em ${escapeHtml(state.config.presetsDir || 'Presets')}:</p>${detectedHtml}` : ''}
+      ${detectedHtml}
+      <p class="preset-section-label">Carregar de um arquivo</p>
       <div class="preset-dropzone" id="preset-dropzone">
-        <div><strong>Arraste um arquivo .gnpreset aqui</strong></div>
-        <div>ou cole o JSON do preset abaixo</div>
-        <textarea class="preset-paste" id="preset-paste" placeholder="Cole aqui o conteúdo de um preset..."></textarea>
-        <button class="btn btn-ghost" id="preset-browse">Procurar arquivo</button>
+        <div class="preset-dropzone-icon">${ICON_UPLOAD}</div>
+        <strong>Arraste um arquivo .gnpreset aqui</strong>
+        <span>ou</span>
+        <div><button class="btn btn-ghost" id="preset-browse" ${busy ? 'disabled' : ''}>${busy ? 'Carregando…' : 'Procurar arquivo'}</button></div>
+      </div>
+      <div class="preset-paste-row">
+        <span class="preset-paste-label">Ou cole aqui o JSON de um preset</span>
+        <textarea class="preset-paste" id="preset-paste" placeholder="Cole aqui o conteúdo de um preset .gnpreset..."></textarea>
       </div>
     </div>`;
 }
@@ -967,11 +1033,22 @@ function bindWelcome() {
     setTimeout(() => { if ($paste.value.trim()) applyPresetJson($paste.value); }, 0);
   });
 
-  document.getElementById('preset-browse').addEventListener('click', () => Bridge.send('browse-preset-file'));
+  document.getElementById('preset-browse').addEventListener('click', () => requestPreset('browse-preset-file'));
 
   document.querySelectorAll('[data-load-preset]').forEach((el) => {
-    el.addEventListener('click', () => Bridge.send('load-preset', { fileName: el.dataset.loadPreset }));
+    el.addEventListener('click', () => requestPreset('load-preset', { fileName: el.dataset.loadPreset }));
   });
+}
+
+// Carregar um preset via PS (browse/load, ao contrario de paste/drop, que
+// resolvem no proprio JS) e uma viagem de ida-e-volta - trava os botoes
+// "Usar"/"Procurar arquivo" enquanto espera pra nao disparar dois cliques
+// concorrentes; 'preset-loaded' (onBridgeMessage) destrava de volta.
+function requestPreset(type, payload) {
+  if (state.presetsBusy) return;
+  state.presetsBusy = true;
+  render();
+  Bridge.send(type, payload);
 }
 
 function applyPresetJson(text) {
@@ -1049,7 +1126,7 @@ function viewAbout() {
       <div class="panel" style="margin-top:24px">
         <p class="panel-sub" style="margin:0">
           Esse instalador nasceu de reformatar o próprio PC e cansar de reconfigurar tudo na mão — é código
-          aberto, junto com <strong>thero</strong>, <strong>Athena</strong> e <strong>Zeus</strong>, no repositório <code>myscripts</code>.
+          aberto, junto com <strong>thero</strong>, <strong>Athena</strong> e <strong>Zeus</strong>, na organização <code>theroverse</code> no GitHub.
         </p>
       </div>
     </div>`;
@@ -1137,16 +1214,20 @@ function viewCatalog() {
 
 function catalogCard(a) {
   const color = CATEGORY_COLORS[a.category] || '#93a1c4';
-  // Já instalado: fica marcado e travado (sem dar pra desmarcar) - não faz
-  // sentido deixar o usuário desinstalar sem querer daqui.
   const installed = state.installedIds.has(a.id);
-  const checked = installed || state.selectedApps.has(a.id);
+  // Já instalado e marcado pra remover (ver bindCatalogCards): some do
+  // "instalado" e some do "selecionado" - desmarca visualmente, sinaliza
+  // que vai ser desinstalado de verdade so na etapa de instalação.
+  const removing = installed && state.appsToUninstall.has(a.id);
+  const checked = !removing && (installed || state.selectedApps.has(a.id));
   const icon = `assets/icons/${iconFileName(a.id)}`;
   const desc = APP_DESCRIPTIONS[a.id] || '';
   const versionText = (!a.version || a.version === 'Unknown' || a.source === 'msstore') ? 'Microsoft Store' : `v${a.version}`;
-  const metaText = installed ? 'Já instalado' : versionText;
+  const metaText = removing ? 'Será desinstalado' : installed ? 'Já instalado' : versionText;
+  const title = removing ? 'Marcado pra desinstalar — clique pra manter instalado'
+    : installed ? 'Já instalado — clique pra desinstalar' : '';
   return `
-    <div class="app-card ${checked ? 'is-checked' : ''} ${installed ? 'is-installed' : ''}" data-id="${escapeAttr(a.id)}" ${installed ? 'data-installed="1" title="Já instalado nesta máquina"' : ''}>
+    <div class="app-card ${checked ? 'is-checked' : ''} ${installed ? 'is-installed' : ''} ${removing ? 'is-removing' : ''}" data-id="${escapeAttr(a.id)}" ${installed ? 'data-installed="1"' : ''} ${title ? `title="${escapeAttr(title)}"` : ''}>
       <div class="app-card-top">
         <span class="app-card-icon"><img src="${icon}" alt="" onerror="this.parentElement.style.background='${color}22';this.remove()" /></span>
         <span class="check-box app-card-check">${ICON_CHECK}</span>
@@ -1154,6 +1235,7 @@ function catalogCard(a) {
       <div class="app-card-name">${escapeHtml(a.label)}</div>
       <div class="app-card-meta"><span class="dot" style="background:${color}"></span>${escapeHtml(CATEGORY_LABELS[a.category] || a.category)} · ${escapeHtml(metaText)}</div>
       <p class="app-card-desc">${escapeHtml(desc)}</p>
+      ${a.noSilent ? '<span class="chip" style="margin-top:8px"><span class="dot" style="background:var(--amber)"></span>Você precisa terminar a instalação na hora</span>' : ''}
     </div>`;
 }
 
@@ -1181,12 +1263,70 @@ function bindCatalog() {
 
 function bindCatalogCards(scope) {
   scope.querySelectorAll('.app-card[data-id]').forEach((el) => {
-    if (el.dataset.installed) return; // já instalado: não dá pra desmarcar
     el.addEventListener('click', () => {
       const id = el.dataset.id;
+      if (el.dataset.installed) {
+        if (state.appsToUninstall.has(id)) {
+          // já estava marcado pra remover - clicar de novo so desfaz, sem
+          // precisar confirmar (voltar ao estado "instalado" é seguro).
+          // Reinclui em selectedApps: todo app instalado mora nesse set
+          // (ver onBridgeMessage 'installed-apps') - sem isso o contador
+          // "X selecionados no total" ficava incoerente com o card, que
+          // volta a mostrar marcado.
+          state.appsToUninstall.delete(id);
+          state.selectedApps.add(id);
+          refreshCatalog();
+        } else {
+          openConfirmUninstall(id);
+        }
+        return;
+      }
       if (state.selectedApps.has(id)) state.selectedApps.delete(id); else state.selectedApps.add(id);
       refreshCatalog();
     });
+  });
+}
+
+function findCatalogApp(id) {
+  const all = [...(state.config.wingetApps || []), ...state.extraApps];
+  return all.find((a) => a.id === id);
+}
+
+// Desmarcar um app JÁ instalado é uma ação com efeito real (desinstala de
+// verdade na etapa de instalação) - por isso passa por confirmação em vez
+// de só desmarcar o card, diferente de um app ainda não instalado.
+function openConfirmUninstall(id) {
+  const app = findCatalogApp(id);
+  state.modal = { type: 'confirm-uninstall', id, label: app ? app.label : id };
+  render();
+}
+
+function viewConfirmUninstallModal() {
+  const m = state.modal;
+  return `
+    <div class="modal-overlay" id="modal-overlay">
+      <div class="modal-card">
+        <p class="panel-title">Desinstalar ${escapeHtml(m.label)}?</p>
+        <p class="panel-sub">
+          Isso remove o programa de verdade quando a instalação rodar — não dá só pra desmarcar.
+          Se mudar de ideia antes disso, clique no card de novo.
+        </p>
+        <div class="modal-actions">
+          <button class="btn btn-subtle" id="modal-cancel">Cancelar</button>
+          <button class="btn btn-danger" id="modal-confirm">Desinstalar</button>
+        </div>
+      </div>
+    </div>`;
+}
+
+function bindConfirmUninstallModal() {
+  const { id } = state.modal;
+  document.getElementById('modal-cancel').addEventListener('click', () => { state.modal = null; render(); });
+  document.getElementById('modal-confirm').addEventListener('click', () => {
+    state.appsToUninstall.add(id);
+    state.selectedApps.delete(id);
+    state.modal = null;
+    render();
   });
 }
 
@@ -1411,22 +1551,72 @@ function bindTasksHandlers(root) {
   }
 }
 
-// Mesma regex de Set-UserProfileScript (modules/Setup-PowerShellProfile.ps1)
-// portada pro JS - so pra pre-visualizar, o arquivo real ainda e escrito
-// pelo PS na hora de instalar.
-function renderProfileContent(source, projectsPath) {
-  if (!projectsPath) return source;
-  const escaped = projectsPath.replace(/'/g, "''");
-  return source.replace(/^[ \t]*\$project_path[ \t]*=[ \t]*\$HOME[ \t]*$/m, `    $project_path = '${escaped}'`);
+// Manda a etapa "Profile do PowerShell" buscar o preview de verdade no
+// PS (Get-MergedProfileContent, modules/Setup-PowerShellProfile.ps1) -
+// so ele sabe ler o $PROFILE real dessa maquina e o arquivo adicional
+// que o usuario apontar. profilePreviewKey evita pedir de novo toda vez
+// que render() roda por outro motivo qualquer - so quando o caminho
+// extra ou a pasta de projetos realmente mudam.
+function requestProfilePreview() {
+  const key = `${state.customProfilePath}|${state.projectsFolder}`;
+  if (state.profilePreviewKey === key || state.profilePreviewLoading) return;
+  state.profilePreviewKey = key;
+  state.profilePreviewLoading = true;
+  Bridge.send('preview-profile', { customPath: state.customProfilePath, projectsFolder: state.projectsFolder });
+}
+
+// Realce de sintaxe do PowerShell pra pre-visualizacao do profile - so
+// pra leitura, escrito a mao (sem lib externa: o resto do app inteiro e
+// zero-dependencia, um unico app.js, e essa tela roda offline dentro do
+// WebView2). Paleta restrita de proposito, reaproveitando so os tokens
+// que ja existem em style.css (nenhuma cor nova inventada so pra isso):
+// comentario = --text-faint, string = --teal, variavel = mistura clara
+// de --accent, palavra-chave = --accent, numero = --amber, cmdlet
+// (padrao Verbo-Substantivo) = so peso maior, sem cor nova.
+const PS_KEYWORDS = 'function|param|if|elseif|else|foreach|for|while|do|until|switch|try|catch|finally|return|break|continue|throw|begin|process|end|class|enum|using|in|not|and|or';
+const PS_TOKEN_RE = new RegExp(
+  '(@"[\\s\\S]*?"@|@\'[\\s\\S]*?\'@)' + // 1 here-string
+  '|(#[^\\n]*)' + // 2 comentario
+  '|("(?:[^"\\\\]|\\\\.)*")' + // 3 string com aspas duplas
+  '|(\'(?:[^\']|\'\')*\')' + // 4 string com aspas simples
+  '|(\\$\\w+(?::\\w+)?|\\$\\{[^}]*\\})' + // 5 variavel
+  '|\\b(' + PS_KEYWORDS + ')\\b' + // 6 palavra-chave
+  '|\\b([A-Z][A-Za-z0-9]*-[A-Z][A-Za-z0-9]*)\\b' + // 7 cmdlet Verbo-Substantivo
+  '|\\b(\\d+(?:\\.\\d+)?)\\b', // 8 numero
+  'gi'
+);
+
+function highlightPowerShell(code) {
+  let out = '';
+  let last = 0;
+  let m;
+  PS_TOKEN_RE.lastIndex = 0;
+  while ((m = PS_TOKEN_RE.exec(code))) {
+    out += escapeHtml(code.slice(last, m.index));
+    const cls = m[1] || m[3] || m[4] ? 'ps-string'
+      : m[2] ? 'ps-comment'
+      : m[5] ? 'ps-variable'
+      : m[6] ? 'ps-keyword'
+      : m[7] ? 'ps-cmdlet'
+      : 'ps-number';
+    out += `<span class="${cls}">${escapeHtml(m[0])}</span>`;
+    last = PS_TOKEN_RE.lastIndex;
+  }
+  out += escapeHtml(code.slice(last));
+  return out;
 }
 
 // Etapa dedicada so pra deixar claro, ANTES de instalar, exatamente o que
 // vai virar o $PROFILE do usuario - mesmo padrao do step 'suite' (thero):
 // Avançar prossegue (liga PowerShellProfile), Pular desliga - ver
-// renderNav/onNext/onSkip.
+// renderNav/onNext/onSkip. Tambem deixa apontar um arquivo adicional (ex:
+// o profile de verdade de alguem, guardado num repo git privado) - o
+// Genesis mescla padrao + o que ja existe na maquina + esse arquivo.
 function viewProfilePreview() {
-  const source = state.config.profileSource || '';
-  const content = renderProfileContent(source, state.projectsFolder);
+  // profilePreview (vindo do PS) e o de verdade; profileSource (o padrao
+  // cru, decodificado uma vez no config inicial) so evita tela em branco
+  // antes da primeira resposta de 'preview-profile' chegar.
+  const content = state.profilePreview || state.config.profileSource || '';
   const on = state.tasks.PowerShellProfile !== false;
   return `
     <div class="screen">
@@ -1437,10 +1627,48 @@ function viewProfilePreview() {
         ${on ? '' : ' Etapa pulada — nenhum arquivo será tocado.'}
       </p>
       <div class="panel">
-        <p class="panel-title">Conteúdo final</p>
-        <div class="log-panel log-panel-tall">${escapeHtml(content)}</div>
+        <p class="panel-title">Profile adicional (opcional)</p>
+        <p class="panel-sub">
+          Guarda seu profile de verdade em outro lugar — um repositório git privado, por exemplo? Aponte o arquivo aqui.
+          O Genesis junta os três: o dele por padrão, o que já existir nesta máquina, e este que você escolher.
+        </p>
+        <div style="display:flex; gap:8px; align-items:center;">
+          <input type="text" class="modal-input" id="custom-profile-path" style="margin:0; flex:1" placeholder="Caminho de um arquivo .ps1 (opcional)..." value="${escapeAttr(state.customProfilePath)}" />
+          <button class="btn btn-ghost" id="custom-profile-browse">Procurar arquivo</button>
+          ${state.customProfilePath ? '<button class="btn btn-subtle" id="custom-profile-clear">Remover</button>' : ''}
+        </div>
+      </div>
+      <div class="panel">
+        <p class="panel-title">Conteúdo final${state.profilePreviewLoading ? ' — atualizando…' : ''}</p>
+        ${state.profilePreviewError ? `<div class="preset-banner is-error">Não consegui montar a prévia: ${escapeHtml(state.profilePreviewError)}</div>` : ''}
+        ${codeViewerHtml(content)}
       </div>
     </div>`;
+}
+
+// Visualizador com cara de IDE: numeros de linha + realce de sintaxe
+// (highlightPowerShell) - sem quebra de linha (como qualquer editor de
+// codigo de verdade), rola na horizontal se precisar.
+function codeViewerHtml(content) {
+  const lines = content.split('\n');
+  const gutter = lines.map((_, i) => i + 1).join('\n');
+  return `
+    <div class="code-viewer">
+      <div class="code-viewer-gutter">${gutter}</div>
+      <pre class="code-viewer-code">${highlightPowerShell(content)}</pre>
+    </div>`;
+}
+
+function bindProfile() {
+  const $path = document.getElementById('custom-profile-path');
+  const $browse = document.getElementById('custom-profile-browse');
+  const $clear = document.getElementById('custom-profile-clear');
+  $path.addEventListener('change', () => { state.customProfilePath = $path.value.trim(); render(); });
+  $browse.addEventListener('click', () => Bridge.send('browse-file', {
+    field: 'customProfilePath',
+    filter: 'Arquivos PowerShell (*.ps1)|*.ps1|Todos os arquivos (*.*)|*.*',
+  }));
+  if ($clear) $clear.addEventListener('click', () => { state.customProfilePath = ''; render(); });
 }
 
 // Uma tela so pras 3 ferramentas (antes eram 3 telas separadas), reproduzindo
@@ -1499,6 +1727,7 @@ function suiteHubCard(id, theroOn) {
 function viewReview() {
   const totalApps = state.selectedApps.size;
   const totalTasks = Object.values(state.tasks).filter(Boolean).length;
+  const totalUninstalls = state.appsToUninstall.size;
   const ha = state.homeAssistant;
   return `
     <div class="screen">
@@ -1507,6 +1736,7 @@ function viewReview() {
       <div class="panel">
         <p class="panel-title">Resumo</p>
         <p class="panel-sub" style="margin:0">${totalApps} aplicativos selecionados · ${totalTasks} etapas de sistema ativas.</p>
+        ${totalUninstalls ? `<div class="preset-banner is-error" style="margin:14px 0 0">${totalUninstalls} app(s) serão desinstalados: ${[...state.appsToUninstall].map((id) => escapeHtml((findCatalogApp(id) || {}).label || id)).join(', ')}.</div>` : ''}
       </div>
 
       ${state.tasks.HomeAssistant ? `
