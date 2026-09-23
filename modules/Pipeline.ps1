@@ -50,7 +50,8 @@ function Invoke-GenesisPipeline {
     param(
         [Parameter(Mandatory)][string]$Root,
         [Parameter(Mandatory)]$Tasks,
-        [string[]]$WingetSelectedIds
+        [string[]]$WingetSelectedIds,
+        [string[]]$WingetUninstallIds
     )
 
     $results = [ordered]@{}
@@ -63,6 +64,14 @@ function Invoke-GenesisPipeline {
     $projectsFolderPath = Join-Path $Root 'config\projects-folder.json'
     $projectsFolder = if (Test-Path $projectsFolderPath) {
         (Get-Content -Raw -Path $projectsFolderPath | ConvertFrom-Json).path
+    } else { '' }
+
+    # Arquivo adicional de profile informado na etapa "Profile do
+    # PowerShell" (config/profile-custom-path.json) - ver o comentario
+    # grande em Get-MergedProfileContent (modules/Setup-PowerShellProfile.ps1).
+    $customProfilePathPath = Join-Path $Root 'config\profile-custom-path.json'
+    $customProfilePath = if (Test-Path $customProfilePathPath) {
+        (Get-Content -Raw -Path $customProfilePathPath | ConvertFrom-Json).path
     } else { '' }
 
     function Get-Task2 {
@@ -88,7 +97,7 @@ function Invoke-GenesisPipeline {
     }
     if (Get-Task2 'WingetApps') {
         $results['WingetApps'] = Invoke-Step -Key 'WingetApps' -Name 'Apps via winget' -Action {
-            Install-WingetApps -ConfigPath (Join-Path $Root 'config\winget-apps.json') -SelectedIds $WingetSelectedIds
+            Install-WingetApps -ConfigPath (Join-Path $Root 'config\winget-apps.json') -SelectedIds $WingetSelectedIds -UninstallIds $WingetUninstallIds
         }
     }
     if (Get-Task2 'GitHubSsh') {
@@ -121,7 +130,7 @@ function Invoke-GenesisPipeline {
     }
     if (Get-Task2 'PowerShellProfile') {
         $results['PowerShellProfile'] = Invoke-Step -Key 'PowerShellProfile' -Name 'Profile do PowerShell' -Action {
-            Set-UserProfileScript -SourceProfile (Join-Path $Root 'Microsoft.PowerShell_profile.ps1') -ProjectsPath $projectsFolder
+            Set-UserProfileScript -SourceProfile (Join-Path $Root 'Microsoft.PowerShell_profile.ps1') -ProjectsPath $projectsFolder -CustomProfilePath $customProfilePath
         }
     }
     if (Get-Task2 'TheroGlobal') {

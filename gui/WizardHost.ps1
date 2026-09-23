@@ -11,14 +11,15 @@
                         | 'get-launchable' | 'search-apps' | 'browse-folder'
                         | 'browse-file' | 'ensure-projects-folder'
                         | 'list-presets' | 'load-preset' | 'browse-preset-file'
-                        | 'save-preset'
+                        | 'save-preset' | 'preview-profile'
                         | 'window-close' | 'window-minimize' | 'window-tray'
                         | 'window-drag',
                    payload: <anything the handler needs> }
       PS -> JS : { type: 'config' | 'step' | 'log' | 'done' | 'launchable'
                         | 'search-results' | 'app-status' | 'installed-apps'
                         | 'browse-result' | 'projects-folder-result'
-                        | 'presets-found' | 'preset-loaded' | 'preset-saved',
+                        | 'presets-found' | 'preset-loaded' | 'preset-saved'
+                        | 'profile-preview',
                    payload: <...> }
 #>
 
@@ -115,6 +116,12 @@ trap {
 $Root = if ($Global:GenesisPayloadBase64) { Expand-GenesisPayload -ExeDir $ExeDir } else { $ExeDir }
 . (Join-Path $Root 'modules\Common.ps1')
 . (Join-Path $Root 'modules\Pipeline.ps1')
+# So essas duas rodam automaticamente na thread principal (dot-source do
+# resto dos modules e so dentro da runspace de instalacao, ver
+# Start-InstallRun) - Get-MergedProfileContent/Set-ProfileProjectPath
+# precisam estar aqui tambem pro handler 'preview-profile' (roda na
+# thread principal, ao vivo, antes de qualquer instalacao comecar).
+. (Join-Path $Root 'modules\Setup-PowerShellProfile.ps1')
 
 # ------------------------------------------------------------------ presets --
 
@@ -289,6 +296,7 @@ function Get-CurrentConfig {
     $haPath = Join-Path $Root 'config\home-assistant-vm.json'
     $projectsPath = Join-Path $Root 'config\projects.json'
     $projectsFolderPath = Join-Path $Root 'config\projects-folder.json'
+    $customProfilePathPath = Join-Path $Root 'config\profile-custom-path.json'
     $backupPath = Join-Path $Root 'config\backup-folders.json'
     $presetupPath = Join-Path $Root 'presetup.json'
     $profileSourcePath = Join-Path $Root 'Microsoft.PowerShell_profile.ps1'
@@ -298,12 +306,18 @@ function Get-CurrentConfig {
     $ha = Get-Content -Raw -Path $haPath | ConvertFrom-Json
     $projects = Get-Content -Raw -Path $projectsPath | ConvertFrom-Json
     $projectsFolder = if (Test-Path $projectsFolderPath) { (Get-Content -Raw -Path $projectsFolderPath | ConvertFrom-Json).path } else { '' }
+    $customProfilePath = if (Test-Path $customProfilePathPath) { (Get-Content -Raw -Path $customProfilePathPath | ConvertFrom-Json).path } else { '' }
     $backupFolders = if (Test-Path $backupPath) { Get-Content -Raw -Path $backupPath | ConvertFrom-Json } else { @() }
     $stepDefs = Get-GenesisStepDefinitions -Tasks $tasks
-    # Fonte crua do profile, em base64: a etapa "Profile do PowerShell" da
-    # wizard aplica a MESMA regex de Set-UserProfileScript
-    # (modules/Setup-PowerShellProfile.ps1) no JS pra pre-visualizar o
-    # arquivo final sem escrever nada em disco.
+    # Fonte crua do profile PADRAO, em base64: so serve de preview inicial
+    # rapida (evita tela em branco) antes da primeira resposta de
+    # 'preview-profile' chegar - essa sim monta o preview de verdade
+    # (padrao + o que ja existe na maquina + o arquivo adicional que o
+    # usuario apontar), via Get-MergedProfileContent
+    # (modules/Setup-PowerShellProfile.ps1). Nao da pra fazer esse merge
+    # aqui: a etapa "Profile do PowerShell" precisa saber $PROFILE local e
+    # ler um arquivo arbitrario que so o JS sabe o caminho depois que o
+    # usuario escolhe - por isso e sob demanda, nao no config inicial.
     #
     # PRECISA ser base64, nao a string crua: ConvertTo-Json do Windows
     # PowerShell 5.1 serializa esse profile especifico (~70KB, cheio de
@@ -350,6 +364,7 @@ function Get-CurrentConfig {
         }
         projects      = [array]$projects
         projectsFolder = $projectsFolder
+        customProfilePath = $customProfilePath
         backupFolders = [array]$backupFolders
         stepDefs      = [array]$stepDefs
         profileSourceB64 = $profileSourceB64
@@ -437,6 +452,9 @@ function Save-WizardChoices {
 
     $projectsFolderPath = Join-Path $Root 'config\projects-folder.json'
     @{ path = $Payload.projectsFolder } | ConvertTo-Json | Set-Content -Path $projectsFolderPath -Encoding utf8
+
+    $customProfilePathPath = Join-Path $Root 'config\profile-custom-path.json'
+    @{ path = $Payload.customProfilePath } | ConvertTo-Json | Set-Content -Path $customProfilePathPath -Encoding utf8
 }
 
 # --------------------------------------------------------- launchable apps --
@@ -539,6 +557,22 @@ function Handle-Message {
             Send-ToJs -Type 'launchable' -Payload (Get-LaunchableApps -Results $script:lastResults -Config $config)
         }
         'search-apps' { Start-AppSearch -Query $Msg.payload.query }
+        'preview-profile' {
+            # Sob demanda (nao no config inicial): precisa saber o $PROFILE
+            # de verdade dessa maquina e ler um arquivo arbitrario que o
+            # usuario acabou de apontar na etapa "Profile do PowerShell" -
+            # ver o comentario grande em Get-CurrentConfig.
+            try {
+                $merged = Get-MergedProfileContent -SourceProfile (Join-Path $Root 'Microsoft.PowerShell_profile.ps1') `
+                    -ExistingProfilePath $PROFILE.CurrentUserAllHosts -CustomProfilePath $Msg.payload.customPath
+                $merged = Set-ProfileProjectPath -Content $merged -ProjectsPath $Msg.payload.projectsFolder
+                $bytes = [System.Text.Encoding]::UTF8.GetBytes($merged)
+                Send-ToJs -Type 'profile-preview' -Payload @{ ok = $true; contentB64 = [Convert]::ToBase64String($bytes) }
+            }
+            catch {
+                Send-ToJs -Type 'profile-preview' -Payload @{ ok = $false; error = $_.Exception.Message }
+            }
+        }
         'ensure-projects-folder' {
             # Roda ao clicar "Instalar agora" na Revisao: a pasta pode nao
             # existir ainda (o campo aceita digitar um caminho novo) - tenta
@@ -667,12 +701,17 @@ function Start-InstallRun {
     param($Payload)
 
     $runspace = [runspacefactory]::CreateRunspace()
+    # STA: apps sem instalacao silenciosa (ver Install-WingetApps.ps1,
+    # "noSilent") mostram um MessageBox de verdade nessa runspace em
+    # segundo plano antes de abrir o instalador deles - MessageBox exige
+    # apartamento STA pra funcionar (o default de CreateRunspace() e MTA).
+    $runspace.ApartmentState = 'STA'
     $runspace.Open()
     $ps = [powershell]::Create()
     $ps.Runspace = $runspace
 
     $null = $ps.AddScript({
-        param($Root, $TasksJson, $WingetSelectedIds, $Queue)
+        param($Root, $TasksJson, $WingetSelectedIds, $WingetUninstallIds, $Queue)
 
         . (Join-Path $Root 'modules\Common.ps1')
         $Global:GenesisLogSink = { param($m) $Queue.Enqueue([pscustomobject]@{ Type = 'Log'; Message = $m }) }.GetNewClosure()
@@ -688,7 +727,7 @@ function Start-InstallRun {
 
         $tasks = $TasksJson | ConvertFrom-Json
         try {
-            $result = Invoke-GenesisPipeline -Root $Root -Tasks $tasks -WingetSelectedIds $WingetSelectedIds
+            $result = Invoke-GenesisPipeline -Root $Root -Tasks $tasks -WingetSelectedIds $WingetSelectedIds -WingetUninstallIds $WingetUninstallIds
             $Queue.Enqueue([pscustomobject]@{
                 Type = 'Done'; Results = $result.Results; Reboot = $result.RebootRecommended; LogFile = $script:LogFile
             })
@@ -698,7 +737,7 @@ function Start-InstallRun {
             $Queue.Enqueue([pscustomobject]@{ Type = 'Done'; Results = @{}; Reboot = $false; LogFile = $script:LogFile })
         }
     })
-    $null = $ps.AddArgument($Root).AddArgument(($Payload.tasks | ConvertTo-Json -Depth 6)).AddArgument([string[]]$Payload.selectedAppIds).AddArgument($queue)
+    $null = $ps.AddArgument($Root).AddArgument(($Payload.tasks | ConvertTo-Json -Depth 6)).AddArgument([string[]]$Payload.selectedAppIds).AddArgument([string[]]$Payload.uninstallAppIds).AddArgument($queue)
     $null = $ps.BeginInvoke()
 
     $script:installPs = $ps

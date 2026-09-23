@@ -1,0 +1,44 @@
+{
+  "detector": {
+    "ignoreRules": [],
+    "ignoreFiles": [],
+    "ignoreValues": [
+      {
+        "rule": "ai-color-palette",
+        "value": "*",
+        "files": [
+          "gui/wizard/index.html"
+        ],
+        "createdAt": "2026-09-20T14:01:14.668Z",
+        "reason": "Genesis's own established brand identity (violet #A855F7/#C084FC gradient), documented in gui/wizard/style.css header comment as matching genesis-icon-app.svg and theroverse/src/data/ecosystem.ts - predates this session, not an AI default"
+      },
+      {
+        "rule": "gradient-text",
+        "value": "*",
+        "files": [
+          "gui/wizard/style.css"
+        ],
+        "createdAt": "2026-09-20T20:27:20.976Z",
+        "reason": "Genesis's own DESIGN.md documents .text-gradient as the single deliberate accent moment per screen (one headline word, primary button, active nav) - not ambient decoration. Predates this session."
+      },
+      {
+        "rule": "gradient-text",
+        "value": "*",
+        "files": [
+          "gui/wizard/index.html"
+        ],
+        "createdAt": "2026-09-20T20:27:21.143Z",
+        "reason": "Same .text-gradient utility as style.css:197, applied via inline usage; see that ignore's reason."
+      },
+      {
+        "rule": "bounce-easing",
+        "value": "cubic-bezier(.34, 1.56, .64, 1)",
+        "files": [
+          "gui/wizard/style.css"
+        ],
+        "createdAt": "2026-09-21T02:30:36.351Z",
+        "reason": "Pre-existing, one-time install-progress-card completion bounce (.progress-card.pop), not something this session introduced or was asked to touch. Matches DESIGN.md's stated motion philosophy: one authored feedback moment, not scattered effects."
+      }
+    ]
+  }
+}

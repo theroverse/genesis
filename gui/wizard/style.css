@@ -315,6 +315,10 @@ html, body {
 .btn-primary:hover { filter: brightness(1.08); }
 .btn-primary:disabled { opacity: .4; cursor: not-allowed; filter: none; }
 
+.btn-danger { background: var(--danger); color: #2a0507; }
+.btn-danger:hover { filter: brightness(1.08); }
+.btn-danger:disabled { opacity: .4; cursor: not-allowed; filter: none; }
+
 .btn-ghost {
   background: transparent;
   border-color: var(--border-strong);
@@ -634,11 +638,45 @@ html, body {
   line-height: 1.6;
 }
 
-/* Preview do profile do PowerShell inteiro: mesma caixa do log de
-   instalação, só mais alta pra caber o arquivo sem tanto scroll. */
-.log-panel-tall {
+/* ---------- code viewer (preview do profile do PowerShell) ---------- */
+/* Realce de sintaxe proprio (highlightPowerShell em app.js, sem lib
+   externa) + numeros de linha - pra ler como um editor de codigo de
+   verdade, nao um dump de texto plano. */
+
+.code-viewer {
+  display: flex;
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
   height: 420px;
+  overflow: auto;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.65;
 }
+.code-viewer-gutter {
+  flex: none;
+  padding: 14px 12px;
+  text-align: right;
+  color: var(--text-faint);
+  white-space: pre;
+  user-select: none;
+  border-right: 1px solid var(--border);
+  background: rgba(0, 0, 0, 0.18);
+}
+.code-viewer-code {
+  flex: 1;
+  margin: 0;
+  padding: 14px 16px;
+  white-space: pre;
+  color: var(--text-dim);
+}
+.ps-comment { color: var(--text-faint); font-style: italic; }
+.ps-string { color: var(--teal); }
+.ps-variable { color: color-mix(in oklab, var(--accent) 55%, var(--text)); }
+.ps-keyword { color: var(--accent); font-weight: 600; }
+.ps-cmdlet { color: var(--text); font-weight: 600; }
+.ps-number { color: var(--amber); }
 
 /* ---------- done screen ---------- */
 
@@ -713,8 +751,12 @@ html, body {
 }
 .app-card:hover { border-color: var(--border-strong); background: var(--bg-elevated-2); }
 .app-card.is-checked { border-color: var(--accent); background: var(--bg-elevated-2); }
-.app-card.is-installed { cursor: default; }
-.app-card.is-installed:hover { border-color: var(--accent); background: var(--bg-elevated-2); }
+/* Instalado e desmarcado (usuario confirmou remover, ver
+   openConfirmUninstall) - mesma linguagem de cor do banner de erro/aviso
+   do resto do app, nao inventa um estado novo. */
+.app-card.is-removing { border-color: color-mix(in oklab, var(--danger) 45%, var(--border-strong)); }
+.app-card.is-removing .app-card-meta { color: var(--danger); }
+.app-card.is-removing:hover { border-color: var(--danger); background: var(--bg-elevated-2); }
 
 .catalog-group-title { margin: 22px 0 10px; }
 .catalog-group-title:first-child { margin-top: 0; }
@@ -816,6 +858,16 @@ html, body {
 
 /* ---------- presets (tela inicial + modal "salvar?") ---------- */
 
+.preset-section-label {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  margin: 18px 0 8px;
+}
+.preset-section-label:first-child { margin-top: 0; }
+
 .preset-dropzone {
   border: 1.5px dashed var(--border-strong);
   border-radius: var(--radius-lg);
@@ -826,12 +878,21 @@ html, body {
   transition: border-color .12s ease, background .12s ease;
 }
 .preset-dropzone.is-drag { border-color: var(--accent); background: var(--bg-elevated-2); color: var(--text); }
-.preset-dropzone strong { color: var(--text); }
-.preset-dropzone .btn { margin-top: 12px; }
+.preset-dropzone-icon {
+  width: 34px; height: 34px;
+  margin: 0 auto 10px;
+  color: var(--text-faint);
+  transition: color .12s ease;
+}
+.preset-dropzone-icon svg { width: 100%; height: 100%; display: block; }
+.preset-dropzone.is-drag .preset-dropzone-icon { color: var(--accent); }
+.preset-dropzone strong { color: var(--text); display: block; margin-bottom: 2px; }
+.preset-dropzone .btn { margin-top: 14px; }
 
+.preset-paste-row { margin-top: 14px; }
+.preset-paste-label { display: block; font-size: 12px; color: var(--text-faint); margin-bottom: 6px; }
 .preset-paste {
   width: 100%;
-  margin-top: 14px;
   background: var(--bg-inset);
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-sm);
@@ -840,11 +901,12 @@ html, body {
   font-size: 11.5px;
   padding: 10px 12px;
   resize: vertical;
-  min-height: 60px;
+  min-height: 52px;
 }
 .preset-paste:focus { outline: none; border-color: var(--accent); }
+.preset-paste::placeholder { color: var(--text-faint); }
 
-.preset-list { display: flex; flex-direction: column; gap: 8px; margin-top: 14px; }
+.preset-list { display: flex; flex-direction: column; gap: 8px; margin: 8px 0 14px; }
 .preset-row {
   display: flex;
   align-items: center;
@@ -867,6 +929,10 @@ html, body {
   font-size: 13px;
   margin-bottom: 16px;
 }
+/* SVG cru (ICON_CHECK) sem width/height: sem isso o navegador usa o
+   default de imagem substituida (~300x150) e o icone estoura a tela
+   inteira - achado em teste real (screenshot do usuario). */
+.preset-banner svg { width: 15px; height: 15px; flex: none; }
 .preset-banner.is-ok { background: color-mix(in oklab, var(--teal) 14%, transparent); color: var(--teal); border: 1px solid color-mix(in oklab, var(--teal) 30%, transparent); }
 .preset-banner.is-error { background: color-mix(in oklab, var(--danger) 14%, transparent); color: var(--danger); border: 1px solid color-mix(in oklab, var(--danger) 30%, transparent); }
 
@@ -906,4 +972,6 @@ html, body {
   padding: 10px 12px;
 }
 .modal-input:focus { outline: none; border-color: var(--accent); }
+.modal-input::placeholder { color: var(--text-faint); }
 .modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 18px; }
+.modal-actions .btn:disabled { opacity: .5; cursor: not-allowed; }
