@@ -6,3 +6,7 @@ dist/
 presetup.json
 .build/
 .smoke.*.log
+
+# Caché do detector impeccable (estado local de rodadas; o que vale e o
+# config.json, com as regras ignoradas deliberadas).
+.impeccable/hook.cache.json
